@@ -1,7 +1,3 @@
-
-// ---------------------------
-// مدير الأذونات المحسن
-// ---------------------------
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -34,31 +30,7 @@ class PermissionManager {
     final status = await Permission.microphone.status;
     return status.isGranted;
   }
-  static void showPermissionDialog1(context) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('إذن الميكروفون مطلوب'),
-        content: const Text(
-            'هذا التطبيق يحتاج إلى إذن الوصول للميكروفون لإجراء المكالمات الصوتية. '
-            'يرجى السماح بالوصول للميكروفون للمتابعة.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('إلغاء'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.of(context).pop();
-              await PermissionManager.requestMicrophonePermission();
-            },
-            child: const Text('طلب الإذن'),
-          ),
-        ],
-      ),
-    );
-  }
+  
   static void showPermissionDialog(context) {
   showDialog(
     context: context,
@@ -107,18 +79,18 @@ class PermissionManager {
   return false;
 }
 
-static Future<bool> checkCameraPermission() async {
-  final status = await Permission.camera.status;
-  return status.isGranted;
-}
+  static Future<bool> checkCameraPermission() async {
+    final status = await Permission.camera.status;
+    return status.isGranted;
+  }
 
-static Future<bool> requestAllPermissions() async {
-  final micPermission = await requestMicrophonePermission();
-  final cameraPermission = await requestCameraPermission();
-  return micPermission && cameraPermission;
-}
+  static Future<bool> requestAllPermissions() async {
+    final micPermission = await requestMicrophonePermission();
+    final cameraPermission = await requestCameraPermission();
+    return micPermission && cameraPermission;
+  }
 
-static Future<bool> checkAllPermissions() async {
+  static Future<bool> checkAllPermissions() async {
   final micPermission = await checkMicrophonePermission();
   final cameraPermission = await checkCameraPermission();
   return micPermission && cameraPermission;

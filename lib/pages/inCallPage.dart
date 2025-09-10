@@ -166,23 +166,6 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
     };
   }
 
-  Map<String, dynamic> _getOptimizedAudioConstraints() {
-    return {
-      'audio': {
-        'echoCancellation': true,
-        'noiseSuppression': true,
-        'autoGainControl': true,
-        'sampleRate': 48000,
-        'channelCount': 1,
-        'googEchoCancellation': true,
-        'googNoiseSuppression': true,
-        'googHighpassFilter': true,
-        'googTypingNoiseDetection': true,
-      },
-      'video': false,
-    };
-  }
-
   Future<void> _toggleVideo() async {
   if (_localStream == null) return;
 
@@ -321,36 +304,6 @@ Future<void> _switchCamera() async {
     rethrow;
   }
 }
-
-  Future<MediaStream> _openLocalAudioStream() async {
-    if (_localStream != null) {
-      AppLogger.info('تدفق الصوت المحلي موجود بالفعل');
-      return _localStream!;
-    }
-
-    try {
-      AppLogger.info('فتح تدفق الصوت المحلي...');
-
-      final constraints = _getOptimizedAudioConstraints();
-      _localStream = await navigator.mediaDevices.getUserMedia(constraints);
-
-      final audioTracks = _localStream!.getAudioTracks();
-      AppLogger.info('تم فتح تدفق الصوت: ${audioTracks.length} مسار صوتي');
-
-      return _localStream!;
-    } catch (e) {
-      AppLogger.error('فشل في فتح تدفق الصوت: $e');
-
-      // طلب الأذونات مرة أخرى
-      final hasPermission =
-          await PermissionManager.requestMicrophonePermission();
-      if (!hasPermission) {
-        throw Exception('لم يتم منح إذن الميكروفون');
-      }
-
-      rethrow;
-    }
-  }
 
   Future<void> _toggleMicrophone() async {
     if (_localStream == null) return;
@@ -718,46 +671,6 @@ Future<void> _switchCamera() async {
     }
   }
 
-  // ---------------------------
-  // Reconnection Logic
-  // ---------------------------
-  Future<void> _cleanupResources2() async {
-  AppLogger.info('تنظيف جميع الموارد...');
-
-  _reconnectionManager?.stopReconnection();
-
-  await _cleanupSignaling();
-  await _cleanupPeerConnections();
-  await _cleanupLocalStream();
-
-  // تنظيف معرضات الفيديو
-  if (_localVideoRenderer != null) {
-    try {
-      await _localVideoRenderer!.dispose();
-      _localVideoRenderer = null;
-    } catch (e) {
-      AppLogger.error('خطأ في تنظيف معرض الفيديو المحلي: $e');
-    }
-  }
-
-  for (final entry in _remoteVideoRenderers.entries) {
-    try {
-      await entry.value.dispose();
-    } catch (e) {
-      AppLogger.error('خطأ في تنظيف معرض فيديو الند ${entry.key}: $e');
-    }
-  }
-  _remoteVideoRenderers.clear();
-
-  try {
-    WakelockPlus.disable();
-  } catch (e) {
-    AppLogger.error('خطأ في إيقاف Wakelock: $e');
-  }
-
-  AppLogger.info('تم تنظيف جميع الموارد');
-}
-
   Future<void> _attemptReconnection() async {
     if (_isConnected || _isConnecting) {
       _reconnectionManager?.stopReconnection();
@@ -798,9 +711,6 @@ Future<void> _switchCamera() async {
     }
   }
 
-  // ---------------------------
-  // Cleanup and Disposal
-  // ---------------------------
   Future<void> _handlePeerDisconnection(String peerId) async {
   AppLogger.info('معالجة انقطاع الند: $peerId');
 
@@ -841,7 +751,6 @@ Future<void> _switchCamera() async {
     });
   }
 }
-
 
   Future<void> _cleanupSignaling() async {
     try {
@@ -920,10 +829,6 @@ Future<void> _switchCamera() async {
     }
   }
 
-  // ---------------------------
-  // UI Helper Methods
-  // ---------------------------
-
   void _showErrorDialog(String title, String message) {
     if (!mounted) return;
 
@@ -972,9 +877,6 @@ Future<void> _switchCamera() async {
     }
   }
 
-  // ---------------------------
-  // Build Method
-  // ---------------------------
 
   @override
   Widget build(BuildContext context) {
