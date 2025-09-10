@@ -27,7 +27,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _checkInitialPermissions() async {
     setState(() => _isCheckingPermissions = true);
 
-    final hasPermission = await PermissionManager.checkMicrophonePermission();
+    // final hasPermission = await PermissionManager.checkMicrophonePermission();
+    final hasPermission = await PermissionManager.checkAllPermissions();
     if (!hasPermission) {
       PermissionManager.showPermissionDialog(context);
     }
@@ -38,7 +39,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _navigateToManager() async {
     if (_isCheckingPermissions) return;
 
-    final hasPermission = await PermissionManager.checkMicrophonePermission();
+    // final hasPermission = await PermissionManager.checkMicrophonePermission();
+    final hasPermission = await PermissionManager.checkAllPermissions();
     if (!hasPermission) {
       final granted = await PermissionManager.requestMicrophonePermission();
       if (!granted) {
@@ -64,7 +66,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _navigateToParticipant() async {
     if (_isCheckingPermissions) return;
 
-    final hasPermission = await PermissionManager.checkMicrophonePermission();
+    final hasPermission = await PermissionManager.checkAllPermissions();
+    // final hasPermission = await PermissionManager.checkMicrophonePermission();
     if (!hasPermission) {
       final granted = await PermissionManager.requestMicrophonePermission();
       if (!granted) {

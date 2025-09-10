@@ -31,6 +31,13 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
   // Controllers
   final _serverController = TextEditingController();
   final _nameController = TextEditingController(text: 'مستخدم');
+  // Video renderers
+  RTCVideoRenderer? _localVideoRenderer;
+  final Map<String, RTCVideoRenderer> _remoteVideoRenderers = {};
+
+  // Video state
+  bool _videoEnabled = true;
+  bool _frontCamera = true;
 
   // WebRTC & Signaling
   final Map<String, RTCPeerConnection> _peerConnections = {};
@@ -46,6 +53,10 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
   bool _microphoneMuted = false;
   bool _speakerOn = true;
   String _connectionStatus = 'غير متصل';
+
+  // Video UI state
+  bool _isLocalVideoExpanded = false;
+
 
   // Managers
   ReconnectionManager? _reconnectionManager;
@@ -124,9 +135,23 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
     }
   }
 
-  // ---------------------------
-  // WebRTC Configuration
-  // ---------------------------
+  Map<String, dynamic> _getOptimizedMediaConstraints() {
+  return {
+    'audio': {
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      'autoGainControl': true,
+      'sampleRate': 48000,
+      'channelCount': 1,
+    },
+    'video': _videoEnabled ? {
+      'width': {'ideal': 640},
+      'height': {'ideal': 480},
+      'frameRate': {'ideal': 30},
+      'facingMode': _frontCamera ? 'user' : 'environment',
+    } : false,
+  };
+}
 
   Map<String, dynamic> _getOptimizedRTCConfiguration() {
     return {
@@ -158,9 +183,144 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
     };
   }
 
-  // ---------------------------
-  // Audio Stream Management
-  // ---------------------------
+  Future<void> _toggleVideo() async {
+  if (_localStream == null) return;
+
+  final videoTracks = _localStream!.getVideoTracks();
+  if (videoTracks.isNotEmpty) {
+    final enabled = !videoTracks.first.enabled;
+    videoTracks.first.enabled = enabled;
+
+    setState(() => _videoEnabled = enabled);
+    AppLogger.info('حالة الفيديو: ${enabled ? 'مفعل' : 'معطل'}');
+
+    if (!enabled && _localVideoRenderer != null) {
+      _localVideoRenderer!.srcObject = null;
+    } else if (enabled && _localVideoRenderer != null) {
+      _localVideoRenderer!.srcObject = _localStream;
+    }
+  }
+}
+
+Future<void> _switchCamera() async {
+  if (_localStream == null) return;
+
+  final videoTracks = _localStream!.getVideoTracks();
+  if (videoTracks.isNotEmpty) {
+    await Helper.switchCamera(videoTracks.first);
+    setState(() => _frontCamera = !_frontCamera);
+    AppLogger.info('تم تبديل الكاميرا إلى: ${_frontCamera ? 'الأمامية' : 'الخلفية'}');
+  }
+}
+
+  Future<RTCPeerConnection> _createPeerConnection(String peerId) async {
+  if (_peerConnections.containsKey(peerId)) {
+    AppLogger.info('اتصال الند موجود بالفعل: $peerId');
+    return _peerConnections[peerId]!;
+  }
+
+  try {
+    AppLogger.info('إنشاء اتصال ند جديد: $peerId');
+
+    final config = _getOptimizedRTCConfiguration();
+    final pc = await createPeerConnection(config);
+
+    // إضافة المسارات المحلية
+    final localStream = await _openLocalMediaStream();
+
+    for (final track in localStream.getTracks()) {
+      await pc.addTrack(track, localStream);
+      AppLogger.info('تم إضافة مسار ${track.kind} للند $peerId');
+    }
+
+    // معالجة ICE candidates
+    pc.onIceCandidate = (RTCIceCandidate candidate) {
+      if (candidate.candidate != null) {
+        _sendSignalingMessage({
+          'type': 'candidate',
+          'to': peerId,
+          'candidate': candidate.toMap(),
+        });
+        AppLogger.debug('تم إرسال ICE candidate للند $peerId');
+      }
+    };
+
+    // معالجة المسارات البعيدة
+    pc.onTrack = (RTCTrackEvent event) async {
+      AppLogger.info('تم استلام مسار بعيد من $peerId: ${event.track.kind}');
+
+      if (event.streams.isNotEmpty) {
+        if (event.track.kind == 'audio') {
+          await _handleRemoteAudioTrack(peerId, event.streams[0]);
+        } else if (event.track.kind == 'video') {
+          await _handleRemoteVideoTrack(peerId, event.streams[0]);
+        }
+      }
+    };
+
+    // باقي الكود كما هو...
+    pc.onConnectionState = (RTCPeerConnectionState state) {
+      AppLogger.info('حالة اتصال الند $peerId: $state');
+
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        // Connected
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _handlePeerDisconnection(peerId);
+      }
+    };
+
+    pc.onIceConnectionState = (RTCIceConnectionState state) {
+      AppLogger.info('حالة ICE للند $peerId: $state');
+
+      if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _handlePeerDisconnection(peerId);
+      }
+    };
+
+    _peerConnections[peerId] = pc;
+    return pc;
+  } catch (e) {
+    AppLogger.error('فشل في إنشاء اتصال الند $peerId: $e');
+    rethrow;
+  }
+}
+
+  Future<MediaStream> _openLocalMediaStream() async {
+  if (_localStream != null) {
+    AppLogger.info('تدفق الوسائط المحلي موجود بالفعل');
+    return _localStream!;
+  }
+
+  try {
+    AppLogger.info('فتح تدفق الوسائط المحلي...');
+
+    final constraints = _getOptimizedMediaConstraints();
+    _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+    // تهيئة معرض الفيديو المحلي
+    if (_videoEnabled) {
+      _localVideoRenderer ??= RTCVideoRenderer();
+      await _localVideoRenderer!.initialize();
+      _localVideoRenderer!.srcObject = _localStream;
+    }
+
+    final audioTracks = _localStream!.getAudioTracks();
+    final videoTracks = _localStream!.getVideoTracks();
+    AppLogger.info('تم فتح تدفق الوسائط: ${audioTracks.length} صوت، ${videoTracks.length} فيديو');
+
+    return _localStream!;
+  } catch (e) {
+    AppLogger.error('فشل في فتح تدفق الوسائط: $e');
+
+    final hasPermissions = await PermissionManager.requestAllPermissions();
+    if (!hasPermissions) {
+      throw Exception('لم يتم منح الأذونات المطلوبة');
+    }
+
+    rethrow;
+  }
+}
 
   Future<MediaStream> _openLocalAudioStream() async {
     if (_localStream != null) {
@@ -215,82 +375,6 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
     }
   }
 
-  // ---------------------------
-  // Peer Connection Management
-  // ---------------------------
-
-  Future<RTCPeerConnection> _createPeerConnection(String peerId) async {
-    if (_peerConnections.containsKey(peerId)) {
-      AppLogger.info('اتصال الند موجود بالفعل: $peerId');
-      return _peerConnections[peerId]!;
-    }
-
-    try {
-      AppLogger.info('إنشاء اتصال ند جديد: $peerId');
-
-      final config = _getOptimizedRTCConfiguration();
-      final pc = await createPeerConnection(config);
-
-      // إضافة المسار الصوتي المحلي
-      final localStream = await _openLocalAudioStream();
-
-      for (final track in localStream.getAudioTracks()) {
-        await pc.addTrack(track, localStream);
-        AppLogger.info('تم إضافة مسار صوتي للند $peerId');
-      }
-
-      // معالجة ICE candidates
-      pc.onIceCandidate = (RTCIceCandidate candidate) {
-        if (candidate.candidate != null) {
-          _sendSignalingMessage({
-            'type': 'candidate',
-            'to': peerId,
-            'candidate': candidate.toMap(),
-          });
-          AppLogger.debug('تم إرسال ICE candidate للند $peerId');
-        }
-      };
-
-      // معالجة المسارات البعيدة
-      pc.onTrack = (RTCTrackEvent event) async {
-        AppLogger.info('تم استلام مسار بعيد من $peerId: ${event.track.kind}');
-
-        if (event.streams.isNotEmpty && event.track.kind == 'audio') {
-          await _handleRemoteAudioTrack(peerId, event.streams[0]);
-        }
-      };
-
-      // معالجة تغييرات حالة الاتصال
-      pc.onConnectionState = (RTCPeerConnectionState state) {
-        AppLogger.info('حالة اتصال الند $peerId: $state');
-
-        if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-          // _qualityMonitor?.startMonitoring(pc, peerId);
-        } else if (state ==
-                RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-            state ==
-                RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-          _handlePeerDisconnection(peerId);
-        }
-      };
-
-      // معالجة تغييرات ICE
-      pc.onIceConnectionState = (RTCIceConnectionState state) {
-        AppLogger.info('حالة ICE للند $peerId: $state');
-
-        if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-          _handlePeerDisconnection(peerId);
-        }
-      };
-
-      _peerConnections[peerId] = pc;
-      return pc;
-    } catch (e) {
-      AppLogger.error('فشل في إنشاء اتصال الند $peerId: $e');
-      rethrow;
-    }
-  }
-
   Future<void> _handleRemoteAudioTrack(
       String peerId, MediaStream stream) async {
     try {
@@ -331,40 +415,26 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _handlePeerDisconnection(String peerId) async {
-    AppLogger.info('معالجة انقطاع الند: $peerId');
+  Future<void> _handleRemoteVideoTrack(String peerId, MediaStream stream) async {
+  try {
+    AppLogger.info('معالجة مسار فيديو بعيد من $peerId');
 
-    // إزالة الاتصال
-    final pc = _peerConnections.remove(peerId);
-    if (pc != null) {
-      try {
-        await pc.close();
-      } catch (e) {
-        AppLogger.error('خطأ في إغلاق اتصال الند $peerId: $e');
-      }
+    if (!_remoteVideoRenderers.containsKey(peerId)) {
+      final renderer = RTCVideoRenderer();
+      await renderer.initialize();
+      _remoteVideoRenderers[peerId] = renderer;
     }
 
-    // إزالة المعرض
-    final renderer = _remoteRenderers.remove(peerId);
-    if (renderer != null) {
-      try {
-        await renderer.dispose();
-      } catch (e) {
-        AppLogger.error('خطأ في تنظيف معرض الند $peerId: $e');
-      }
-    }
+    _remoteVideoRenderers[peerId]!.srcObject = stream;
 
-    // تحديث قائمة الأقران
     if (mounted) {
-      setState(() {
-        _connectedPeers.remove(peerId);
-      });
+      setState(() {});
     }
+  } catch (e) {
+    AppLogger.error('فشل في معالجة الفيديو البعيد من $peerId: $e');
   }
+}
 
-  // ---------------------------
-  // WebRTC Negotiation
-  // ---------------------------
 
   Future<void> _createOfferForPeer(String peerId) async {
     try {
@@ -443,10 +513,6 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
       AppLogger.error('فشل في معالجة ICE candidate من $fromPeer: $e');
     }
   }
-
-  // ---------------------------
-  // Signaling Management
-  // ---------------------------
 
   Future<void> _connectToServer() async {
     if (_isConnecting || _isConnected) {
@@ -655,6 +721,42 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
   // ---------------------------
   // Reconnection Logic
   // ---------------------------
+  Future<void> _cleanupResources2() async {
+  AppLogger.info('تنظيف جميع الموارد...');
+
+  _reconnectionManager?.stopReconnection();
+
+  await _cleanupSignaling();
+  await _cleanupPeerConnections();
+  await _cleanupLocalStream();
+
+  // تنظيف معرضات الفيديو
+  if (_localVideoRenderer != null) {
+    try {
+      await _localVideoRenderer!.dispose();
+      _localVideoRenderer = null;
+    } catch (e) {
+      AppLogger.error('خطأ في تنظيف معرض الفيديو المحلي: $e');
+    }
+  }
+
+  for (final entry in _remoteVideoRenderers.entries) {
+    try {
+      await entry.value.dispose();
+    } catch (e) {
+      AppLogger.error('خطأ في تنظيف معرض فيديو الند ${entry.key}: $e');
+    }
+  }
+  _remoteVideoRenderers.clear();
+
+  try {
+    WakelockPlus.disable();
+  } catch (e) {
+    AppLogger.error('خطأ في إيقاف Wakelock: $e');
+  }
+
+  AppLogger.info('تم تنظيف جميع الموارد');
+}
 
   Future<void> _attemptReconnection() async {
     if (_isConnected || _isConnecting) {
@@ -699,6 +801,47 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
   // ---------------------------
   // Cleanup and Disposal
   // ---------------------------
+  Future<void> _handlePeerDisconnection(String peerId) async {
+  AppLogger.info('معالجة انقطاع الند: $peerId');
+
+  // إزالة الاتصال
+  final pc = _peerConnections.remove(peerId);
+  if (pc != null) {
+    try {
+      await pc.close();
+    } catch (e) {
+      AppLogger.error('خطأ في إغلاق اتصال الند $peerId: $e');
+    }
+  }
+
+  // إزالة معرض الصوت
+  final renderer = _remoteRenderers.remove(peerId);
+  if (renderer != null) {
+    try {
+      await renderer.dispose();
+    } catch (e) {
+      AppLogger.error('خطأ في تنظيف معرض الصوت للند $peerId: $e');
+    }
+  }
+
+  // إزالة معرض الفيديو
+  final videoRenderer = _remoteVideoRenderers.remove(peerId);
+  if (videoRenderer != null) {
+    try {
+      await videoRenderer.dispose();
+    } catch (e) {
+      AppLogger.error('خطأ في تنظيف معرض الفيديو للند $peerId: $e');
+    }
+  }
+
+  // تحديث قائمة الأقران
+  if (mounted) {
+    setState(() {
+      _connectedPeers.remove(peerId);
+    });
+  }
+}
+
 
   Future<void> _cleanupSignaling() async {
     try {
@@ -837,10 +980,9 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.isManager ? 'المدير - في المكالمة' : 'المشارك'),
+        title: Text(widget.isManager ? 'المدير - مكالمة فيديو' : 'مكالمة فيديو'),
         centerTitle: true,
-        backgroundColor:
-            widget.isManager ? Colors.green[700] : Colors.blue[700],
+        backgroundColor: widget.isManager ? Colors.green[700] : Colors.blue[700],
         foregroundColor: Colors.white,
         actions: [
           IconButton(
@@ -854,242 +996,270 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
       body: Container(
         width: double.infinity,
         height: double.infinity,
+        color: Colors.black,
         child: Stack(
           children: [
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: _getConnectionStatusColor().withOpacity(0.1),
-                border: Border(
-                  bottom: BorderSide(
-                    color: _getConnectionStatusColor().withOpacity(0.3),
+            // منطقة عرض الفيديو الرئيسية
+            if (_remoteVideoRenderers.isNotEmpty)
+              _buildMainVideoView()
+            else
+              _buildWaitingView(),
+
+            // الفيديو المحلي (صغير في الزاوية)
+  if (_localVideoRenderer != null && _videoEnabled)
+    Positioned(
+      top: _getLocalVideoPosition().dy,
+      right: _getLocalVideoPosition().dx,
+      child: GestureDetector(
+        onTap: _toggleLocalVideoSize, // إضافة إمكانية النقر لتكبير/تصغير
+        child: Container(
+          width: _isLocalVideoExpanded ? 200 : 120,
+          height: _isLocalVideoExpanded ? 150 : 160,
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.white, width: 2),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.3),
+                blurRadius: 8,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Stack(
+              children: [
+                RTCVideoView(
+                  _localVideoRenderer!,
+                  mirror: _frontCamera,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ),
+                // أيقونة صغيرة تدل على أنه فيديو محلي
+                Positioned(
+                  top: 4,
+                  left: 4,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Icon(
+                      Icons.person,
+                      size: 12,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+
+            // شريط المعلومات العلوي
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withOpacity(0.7),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+                child: SafeArea(
+                  child: Row(
+                    children: [
+                      Icon(
+                        _getConnectionStatusIcon(),
+                        color: _getConnectionStatusColor(),
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _connectionStatus,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (_isConnected) ...[
+                        Icon(
+                          Icons.people,
+                          color: Colors.white,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${_connectedPeers.length + 1}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ),
-              child: Row(
-                children: [
-                  Icon(
-                    _getConnectionStatusIcon(),
-                    color: _getConnectionStatusColor(),
-                    size: 20,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _connectionStatus,
-                    style: TextStyle(
-                      color: _getConnectionStatusColor(),
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  // const Spacer(),
-                  if (_isConnected) ...[
-                    Icon(
-                      Icons.people,
-                      color: Colors.blue[700],
-                      size: 16,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      'المشاركون: ${_connectedPeers.length + 1}',
-                      style: TextStyle(
-                        color: Colors.blue[700],
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
             ),
 
-            // منطقة الاتصال والتحكم
+            // أزرار التحكم السفلية
             Positioned(
               bottom: 0,
               left: 0,
               right: 0,
-              child: Padding(
+              child: Container(
                 padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    if (_isConnecting)
-                      Center(
-                        child: CircularProgressIndicator(),
-                      ),
-                    // أزرار التحكم في الصوت
-                    if (_isConnected) ...[
-                      Card(
-                        elevation: 4,
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceEvenly,
-                                children: [
-                                  // زر الميكروفون
-                                  Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      FloatingActionButton(
-                                        onPressed: _toggleMicrophone,
-                                        backgroundColor: _microphoneMuted
-                                            ? Colors.red[600]
-                                            : Colors.green[600],
-                                        foregroundColor: Colors.white,
-                                        heroTag: 'mic',
-                                        child: Icon(
-                                          _microphoneMuted
-                                              ? Icons.mic_off
-                                              : Icons.mic,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        _microphoneMuted ? 'مكتوم' : 'مفعل',
-                                        style: const TextStyle(fontSize: 12),
-                                      ),
-                                    ],
-                                  ),
-
-                                  // زر السماعة
-                                  Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      FloatingActionButton(
-                                        onPressed: _toggleSpeaker,
-                                        backgroundColor: _speakerOn
-                                            ? Colors.blue[600]
-                                            : Colors.grey[600],
-                                        foregroundColor: Colors.white,
-                                        heroTag: 'speaker',
-                                        child: Icon(
-                                          _speakerOn
-                                              ? Icons.volume_up
-                                              : Icons.volume_off,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        _speakerOn ? 'مفعلة' : 'معطلة',
-                                        style: const TextStyle(fontSize: 12),
-                                      ),
-                                    ],
-                                  ),
-
-                                  // زر إنهاء المكالمة
-                                  Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      FloatingActionButton(
-                                        onPressed: _leaveCall,
-                                        backgroundColor: Colors.red[600],
-                                        foregroundColor: Colors.white,
-                                        heroTag: 'hangup',
-                                        child: const Icon(Icons.call_end),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      const Text(
-                                        'إنهاء',
-                                        style: TextStyle(fontSize: 12),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                              if (widget.isManager)
-                                Center(
-                                  child:
-                                      Text(widget.ip + widget.port.toString()),
-                                )
-                            ],
-                          ),
-                        ),
-                      ),
-
-                      const SizedBox(height: 16),
-
-                      // قائمة المشاركين
-                      // Card(
-                      //   elevation: 4,
-                      //   child: Padding(
-                      //     padding: const EdgeInsets.all(16),
-                      //     child: Column(
-                      //       crossAxisAlignment: CrossAxisAlignment.start,
-                      //       children: [
-                      //         Row(
-                      //           children: [
-                      //             Icon(Icons.people, color: Colors.blue[700]),
-                      //             const SizedBox(width: 8),
-                      //             const Text(
-                      //               'المشاركون في المكالمة',
-                      //               style: TextStyle(
-                      //                 fontSize: 16,
-                      //                 fontWeight: FontWeight.bold,
-                      //               ),
-                      //             ),
-                      //           ],
-                      //         ),
-                      //         const Divider(),
-
-                      //         // المستخدم الحالي
-                      //         ListTile(
-                      //           leading: CircleAvatar(
-                      //             backgroundColor: Colors.green[100],
-                      //             child: Icon(
-                      //               Icons.person,
-                      //               color: Colors.green[700],
-                      //             ),
-                      //           ),
-                      //           title: Text('${_nameController.text} (أنت)'),
-                      //           subtitle: Text(
-                      //             'الهوية: ${_myId ?? 'غير محدد'}',
-                      //             style: const TextStyle(fontSize: 12),
-                      //           ),
-                      //           trailing: Row(
-                      //             mainAxisSize: MainAxisSize.min,
-                      //             children: [
-                      //               Icon(
-                      //                 _microphoneMuted
-                      //                     ? Icons.mic_off
-                      //                     : Icons.mic,
-                      //                 size: 16,
-                      //                 color: _microphoneMuted
-                      //                     ? Colors.red
-                      //                     : Colors.green,
-                      //               ),
-                      //               const SizedBox(width: 4),
-                      //               Icon(
-                      //                 _speakerOn
-                      //                     ? Icons.volume_up
-                      //                     : Icons.volume_off,
-                      //                 size: 16,
-                      //                 color:
-                      //                     _speakerOn ? Colors.blue : Colors.grey,
-                      //               ),
-                      //             ],
-                      //           ),
-                      //         ),
-
-                      //         // المشاركون الآخرون
-                      //         if (_connectedPeers.isNotEmpty) ...[
-                      //           const Divider(),
-                      //           ..._connectedPeers
-                      //               .map((peerId) => _buildPeerTile(peerId)),
-                      //         ] else if (_isConnected) ...[
-                      //           const Divider(),
-                      //           const ListTile(
-                      //             leading: Icon(Icons.info_outline),
-                      //             title: Text('لا يوجد مشاركون آخرون'),
-                      //             subtitle: Text('انتظر انضمام مشاركين آخرين'),
-                      //           ),
-                      //         ],
-                      //       ],
-                      //     ),
-                      //   ),
-                      // ),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      Colors.black.withOpacity(0.8),
+                      Colors.transparent,
                     ],
+                  ),
+                ),
+                child: SafeArea(
+                  child: _isConnected ? _buildControlButtons() : _buildConnectingView(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMainVideoView() {
+
+    if (_remoteVideoRenderers.isEmpty) {
+      return _buildWaitingView();
+    }
+    return _buildGridVideoView();
+  }
+
+  Widget _buildGridVideoView() {
+    final peers = _remoteVideoRenderers.keys.toList();
+    
+  return Container(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        children:List.generate (peers.length, (index) {
+          final peerId = peers[index];
+          return Expanded(child: _buildRemoteVideoTile(peerId));
+        }),
+      ),
+    );
+    
+  }
+
+  Widget _buildRemoteVideoTile(String peerId) {
+    final renderer = _remoteVideoRenderers[peerId];
+    final isConnected = _peerConnections.containsKey(peerId);
+    
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.grey[900],
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isConnected ? Colors.green : Colors.red,
+          width: 2,
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Stack(
+          children: [
+            // الفيديو أو الأفاتار
+            if (renderer != null && renderer.srcObject != null)
+              Container(
+                width: double.infinity,
+                height: double.infinity,
+                child: RTCVideoView(
+                  renderer,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ),
+              )
+            else
+              Container(
+                width: double.infinity,
+                height: double.infinity,
+                color: Colors.grey[800],
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircleAvatar(
+                      radius: 30,
+                      backgroundColor: Colors.blue[700],
+                      child: Icon(
+                        Icons.person,
+                        size: 35,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'بدون فيديو',
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.7),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            // معلومات المشارك
+            Positioned(
+              bottom: 8,
+              left: 8,
+              right: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.7),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'مشارك ${peerId.substring(0, 6)}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // أيقونة حالة الصوت
+                    Icon(
+                      Icons.volume_up,
+                      size: 14,
+                      color: isConnected ? Colors.green : Colors.grey,
+                    ),
+                    const SizedBox(width: 2),
+                    // أيقونة حالة الفيديو
+                    Icon(
+                      renderer?.srcObject != null ? Icons.videocam : Icons.videocam_off,
+                      size: 14,
+                      color: renderer?.srcObject != null ? Colors.green : Colors.grey,
+                    ),
                   ],
                 ),
               ),
@@ -1099,6 +1269,212 @@ class _InCallPageState extends State<InCallPage> with WidgetsBindingObserver {
       ),
     );
   }
+
+  Widget _buildWaitingView() {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.videocam_off,
+            size: 80,
+            color: Colors.white.withOpacity(0.5),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'في انتظار المشاركين...',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.8),
+              fontSize: 18,
+            ),
+          ),
+          if (widget.isManager) ...[
+            const SizedBox(height: 8),
+            Text(
+              'شارك هذا العنوان: ${widget.ip}:${widget.port}',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.6),
+                fontSize: 14,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlButtons() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          // زر الميكروفون
+          _buildControlButton(
+            icon: _microphoneMuted ? Icons.mic_off : Icons.mic,
+            label: _microphoneMuted ? 'مكتوم' : 'صوت',
+            color: _microphoneMuted ? Colors.red : Colors.white,
+            onPressed: _toggleMicrophone,
+          ),
+
+          const SizedBox(width: 8),
+
+          // زر الفيديو
+          _buildControlButton(
+            icon: _videoEnabled ? Icons.videocam : Icons.videocam_off,
+            label: _videoEnabled ? 'فيديو' : 'معطل',
+            color: _videoEnabled ? Colors.white : Colors.red,
+            onPressed: _toggleVideo,
+          ),
+
+          const SizedBox(width: 8),
+
+          // زر تبديل الكاميرا
+          _buildControlButton(
+            icon: Icons.flip_camera_ios,
+            label: 'تبديل',
+            color: Colors.white,
+            onPressed: _videoEnabled ? _switchCamera : null,
+          ),
+
+          const SizedBox(width: 8),
+
+          // زر السماعة
+          _buildControlButton(
+            icon: _speakerOn ? Icons.volume_up : Icons.volume_off,
+            label: _speakerOn ? 'سماعة' : 'صامت',
+            color: _speakerOn ? Colors.white : Colors.grey,
+            onPressed: _toggleSpeaker,
+          ),
+
+          const SizedBox(width: 8),
+
+          // زر إعادة تهيئة الفيديو
+          _buildControlButton(
+            icon: Icons.refresh,
+            label: 'تحديث',
+            color: Colors.orange,
+            onPressed: _refreshVideoConnections,
+          ),
+
+          const SizedBox(width: 8),
+
+          // زر إنهاء المكالمة
+          _buildControlButton(
+            icon: Icons.call_end,
+            label: 'إنهاء',
+            color: Colors.red,
+            onPressed: _leaveCall,
+            isEndCall: true,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback? onPressed,
+    bool isEndCall = false,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            color: isEndCall ? Colors.red : Colors.white.withOpacity(0.2),
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: color.withOpacity(0.5),
+              width: 1,
+            ),
+          ),
+          child: IconButton(
+            onPressed: onPressed,
+            icon: Icon(icon),
+            color: color,
+            iconSize: 28,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.8),
+            fontSize: 10,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildConnectingView() {
+    return const Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircularProgressIndicator(color: Colors.white),
+          SizedBox(height: 16),
+          Text(
+            'جاري الاتصال...',
+            style: TextStyle(color: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+  // دالة لتحديد موضع الفيديو المحلي بناءً على عدد المشاركين
+  Offset _getLocalVideoPosition() {
+    // إذا كان هناك مشاركون كثر، ضع الفيديو في موضع مختلف
+    if (_remoteVideoRenderers.length > 4) {
+      return const Offset(16, 200);
+    } else if (_remoteVideoRenderers.length > 2) {
+      return const Offset(16, 150);
+    }
+    return const Offset(16, 100);
+  }
+
+  // دالة لتبديل حجم الفيديو المحلي
+  void _toggleLocalVideoSize() {
+    setState(() {
+      _isLocalVideoExpanded = !_isLocalVideoExpanded;
+    });
+  }
+  // دالة لإعادة تهيئة الفيديو في حالة حدوث مشاكل
+  Future<void> _refreshVideoConnections() async {
+    AppLogger.info('إعادة تهيئة اتصالات الفيديو...');
+    
+    for (final peerId in _connectedPeers) {
+      final pc = _peerConnections[peerId];
+      if (pc != null) {
+        // إعادة تعيين المسارات
+        try {
+          final localStream = await _openLocalMediaStream();
+          final senders = await pc.getSenders();
+          
+          // تحديث مسار الفيديو إذا لزم الأمر
+          for (final sender in senders) {
+            if (sender.track?.kind == 'video') {
+              final videoTracks = localStream.getVideoTracks();
+              if (videoTracks.isNotEmpty) {
+                await sender.replaceTrack(videoTracks.first);
+                AppLogger.info('تم تحديث مسار الفيديو للند $peerId');
+              }
+            }
+          }
+        } catch (e) {
+          AppLogger.error('فشل في تحديث مسار الفيديو للند $peerId: $e');
+        }
+      }
+    }
+  }
+
 
   Widget _buildPeerTile(String peerId) {
     final isConnected = _peerConnections.containsKey(peerId);
