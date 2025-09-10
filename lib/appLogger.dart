@@ -1,8 +1,5 @@
-// ---------------------------
-// Logger للتسجيل المفصل
-// ---------------------------
 class AppLogger {
-  static const String _logTag = 'VoIPApp';
+  static const String _logTag = '--------';
   
   static void info(String message) {
     final timestamp = DateTime.now().toIso8601String();

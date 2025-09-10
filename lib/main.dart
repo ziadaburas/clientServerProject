@@ -5,7 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'pages/roleSelectPage.dart';
+import 'pages/homePage.dart';
 
 
 void main() {
@@ -34,7 +34,7 @@ class MyApp extends StatelessWidget {
           titleLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
         ),
       ),
-      home: const RoleSelectPage(),
+      home: const HomePage(),
       debugShowCheckedModeBanner: false,
     );
   }
