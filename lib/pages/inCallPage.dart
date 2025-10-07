@@ -21,7 +21,7 @@ class InCallPage extends StatefulWidget {
     required this.ip,
     this.port = 5000,
     this.isManager = false,
-  }) : initialServer = 'ws://$ip:$port';
+  }) : initialServer = 'wss://quests-4jq0.onrender.com';
 
   @override
   State<InCallPage> createState() => _InCallPageState();

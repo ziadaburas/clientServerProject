@@ -32,7 +32,8 @@ class WebServer {
     }
 
     try {
-      _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
+      // _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
+      _server = await HttpServer.bind("0.0.0.0", port);
       AppLogger.info('تم بدء خادم الإشارات على المنفذ $port');
 
       _server!.listen((HttpRequest req) async {
