@@ -55,7 +55,7 @@ class _HomePageState extends State<HomePage> {
       Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => InCallPage(
-            ip: _localIp,
+            ip: "ws://$_localIp:5000",
             isManager: true,
           ),
         ),
@@ -150,7 +150,7 @@ class _HomePageState extends State<HomePage> {
                     controller: _serverController,
                     decoration: InputDecoration(
                       // labelText: 'عنوان خادم الإشارات',
-                      hintText: '192.168.43.1',
+                      hintText: 'ws://192.168.43.1:5000',
                       border: const OutlineInputBorder(),
                       prefixIcon: const Icon(Icons.dns),
                     )),
